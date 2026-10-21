@@ -826,7 +826,11 @@ local function initSidebarWhenSubtitlesLoaded()
 
     if not os.rename(tempPath, tempPath) then
 
-        runCommand({"powershell", "-NoProfile", "-Command", "mkdir", tempPath})
+        if package.config:sub(1, 1) ~= '/' then
+            runCommand({"powershell", "-NoProfile", "-Command", "mkdir", tempPath})
+        else
+            runCommand({"mkdir", "-p", tempPath})
+        end
     end
 
     local ok
