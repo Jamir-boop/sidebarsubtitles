@@ -32,6 +32,7 @@ local config          = {
     use_timestamp          = false
 }
 local offset          = 1
+local browsing        = false
 local currentIndex    = 0
 local subtitles       = {}
 local tempSubtitles   = {}
@@ -74,6 +75,10 @@ local minWidth      = 200
 local maxWidthRatio = 0.7
 local grabWidth     = 6
 local sidebarWidth  = config.width
+
+--the cached ASS file has centisecond times while sub-start has the source time, so a cue matches its start within this many seconds
+
+local startTolerance = 0.02
 
 local function getSubtitleInfo(subtitleType)
 
@@ -211,8 +216,10 @@ local function reset()
     subtitles         = {}
     tempSubtitles     = {}
     offset            = 1
+    browsing          = false
     currentIndex      = 0
     currentSubtitle   = {}
+    search.enabled    = false
     search.processing = false
     drag.active       = false
     drag.hover        = false
@@ -720,6 +727,48 @@ local function togglePlayerControls()
     end
 end
 
+local function findIndexByStart(startTime)
+
+    local index   = 0
+    local nearest = startTolerance
+
+    for i, subtitle in ipairs(subtitles) do
+
+        local distance = math.abs(subtitle.startTime - startTime)
+
+        if distance < nearest then
+
+            index   = i
+            nearest = distance
+        end
+    end
+
+    return index
+end
+
+--selects the cue that starts at startTime (default: the playing one) and centers it, the caller draws
+--a filtered list only gets the selection, its position stays
+
+local function syncCurrentLine(startTime)
+
+    if drag.active or search.enabled or search.processing then return false end
+
+    startTime = startTime or mp.get_property_number(currentSubtitle.group == "p" and "sub-start" or "secondary-sub-start")
+
+    local index = startTime and findIndexByStart(startTime) or 0
+
+    if index == 0 then return false end
+
+    currentIndex = index
+
+    if #tempSubtitles > 0 then return true end
+
+    offset   = math.max(1, math.min(data.maxOffset, index - math.floor((data.lineCount - 1) / 2)))
+    browsing = false
+
+    return true
+end
+
 local function initSidebar()
 
     local overrides   = mp.get_property("sub-ass-style-overrides")
@@ -737,6 +786,7 @@ local function initSidebar()
 
         setBindings("sidebar")
         togglePlayerControls()
+        syncCurrentLine()
         drawSidebar()
 
         if config.hide_loaded_subtitle then
@@ -752,6 +802,12 @@ local function initSidebar()
             end
         end
     else
+
+        --an active search must not outlive the sidebar, its bindings and timers would reach the next one
+
+        if search.enabled then unsetBindings("search") end
+        if search.timer then search.timer:kill() end
+        if search.resultTimer then search.resultTimer:kill() end
 
         input.reset()
         utf8.reset()
@@ -977,58 +1033,6 @@ local function toggleSidebar(subtitleType)
     initSidebar()
 end
 
-local function findIndexByTime()
-
-    local startTime = mp.get_property_number(currentSubtitle.group == "p" and "sub-start" or "secondary-sub-start")
-
-    if not startTime then return 0 end
-
-    local index = 0
-
-    --visible rows
-
-    if data.lineCount and data.lineCount > 0 then
-
-        for i = offset, offset + data.lineCount - 1 do
-
-            if math.floor(subtitles[i].startTime) == math.floor(startTime) then
-
-                index = i
-
-                break
-            end
-        end
-
-        if index > 0 then return index end
-    end
-
-    --fhe first row not shown on screen at the current offset
-
-    if subtitles[offset + data.lineCount] and math.floor(subtitles[offset + data.lineCount].startTime) == math.floor(startTime) then
-
-        index  = offset + data.lineCount
-        offset = index
-
-        return index
-    end
-
-    --last resort, searching from the beginning
-
-    for i in ipairs(subtitles) do
-
-        if math.floor(subtitles[i].startTime) == math.floor(startTime) then
-
-            index = i
-
-            break
-        end
-    end
-
-    if index > 0 then offset = index end
-
-    return index
-end
-
 local function mouseInSidebarSearch()
 
     mouse.x, mouse.y = mp.get_mouse_pos()
@@ -1072,10 +1076,11 @@ local function searchResults()
     offset            = 1
     currentIndex      = 0
 
-    fillData()
-    drawSidebar()
-
     if #tempSubtitles == #subtitles then tempSubtitles = {} end
+
+    fillData()
+    syncCurrentLine()
+    drawSidebar()
 end
 
 local function enter()
@@ -1100,6 +1105,8 @@ local function refreshLayout()
 
     input.font_size = data.searchFontSize
     offset          = math.max(1, math.min(offset, data.maxOffset))
+
+    if not browsing then syncCurrentLine() end
 
     drawSidebar()
 end
@@ -1146,6 +1153,8 @@ local function bindingList(section)
 
                                 drag.active = false
                                 drag.hover  = mouseInGrabZone()
+
+                                if not browsing then syncCurrentLine() end
 
                                 drawSidebar()
                             end
@@ -1213,6 +1222,7 @@ local function bindingList(section)
 
                             if search.timer then search.timer:kill() end
 
+                            syncCurrentLine()
                             drawSidebar()
                         end
                     end
@@ -1229,6 +1239,8 @@ local function bindingList(section)
 
                         if offset > 1 then offset = offset - 1 end
 
+                        browsing = true
+
                         drawSidebar()
                     end
                 end,
@@ -1243,6 +1255,8 @@ local function bindingList(section)
                     if sidebarEnabled and not search.processing and mouseInSidebar() then
 
                         if data.maxOffset and offset < data.maxOffset then offset = offset + 1 end
+
+                        browsing = true
 
                         drawSidebar()
                     end
@@ -1299,34 +1313,16 @@ function unsetBindings(section)
     for name in pairs(bindingList(section)) do mp.remove_key_binding("sidebarsubtitles_"..section..name) end
 end
 
-mp.observe_property("sub-text", "native", function(_, text)
+--the start changes with every cue, even when two cues have the same text
 
-    if sidebarEnabled and not drag.active and not search.processing and currentSubtitle.group == "p" and text and text ~= "" and not mouseInSidebar() then
+mp.observe_property("sub-start", "number", function(_, startTime)
 
-        local foundedIndex = findIndexByTime()
-
-        if foundedIndex > 0 then
-
-            currentIndex = foundedIndex
-
-            drawSidebar()
-        end
-    end
+    if sidebarEnabled and currentSubtitle.group == "p" and startTime and syncCurrentLine(startTime) then drawSidebar() end
 end)
 
-mp.observe_property("secondary-sub-text", "native", function(_, text)
+mp.observe_property("secondary-sub-start", "number", function(_, startTime)
 
-    if sidebarEnabled and not drag.active and not search.processing and currentSubtitle.group == "s" and text and text ~= "" and not mouseInSidebar() then
-
-        local foundedIndex = findIndexByTime()
-
-        if foundedIndex > 0 then
-
-            currentIndex = foundedIndex
-
-            drawSidebar()
-        end
-    end
+    if sidebarEnabled and currentSubtitle.group == "s" and startTime and syncCurrentLine(startTime) then drawSidebar() end
 end)
 
 mp.observe_property("mouse-pos", "native", function()
