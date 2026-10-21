@@ -22,6 +22,7 @@ local config          = {
     padding_x              = 14,
     padding_y              = 7,
     max_len                = 38,
+    font_scale             = 1.0,
     bar_width              = 3,
     bar_min_height         = 50,
     hide_loaded_subtitle   = false,
@@ -57,6 +58,13 @@ local colors          = {
 local overlay         = mp.create_osd_overlay("ass-events")
 
 options.read_options(config, "sidebarsubtitles")
+
+local function clampScale(scale)
+
+    return math.max(0.7, math.min(2.5, scale))
+end
+
+local fontScale = clampScale(config.font_scale)
 
 local function getSubtitleInfo(subtitleType)
 
@@ -234,7 +242,9 @@ end
 
 local function truncate(str, breakingPoint)
 
-    if not breakingPoint and config.max_len > utf8.len(str) then return str end
+    local maxLen = math.max(1, math.floor(config.max_len / fontScale))
+
+    if not breakingPoint and maxLen > utf8.len(str) then return str end
 
     local n         = 0
     local inTags    = false
@@ -258,7 +268,7 @@ local function truncate(str, breakingPoint)
 
             if breakingPoint and breakingPoint > 0 then
 
-                if k == config.max_len + 1 then deleteThis = true end
+                if k == maxLen + 1 then deleteThis = true end
 
                 if k == breakingPoint and l == 1 then
 
@@ -268,7 +278,7 @@ local function truncate(str, breakingPoint)
                 end
             else
 
-                if k == config.max_len + 1 then
+                if k == maxLen + 1 then
 
                     if l == 1 then k = 1 end
 
@@ -477,7 +487,7 @@ local function drawSidebar()
         --icon
 
         ass:new_event()
-        ass:pos(searchBoxX + config.width - config.padding_x * 2 - 33, config.padding_y + 7)
+        ass:pos(searchBoxX + config.width - config.padding_x * 2 - 33, config.padding_y + data.searchBoxHeight / 2 - 8)
         ass:append(string.format("{\\bord0\\1c&H%s&\\fs7\\p1\\fscx40\\fscy40}", colors.searchText))
         ass:append("m 16 0 b 24 0 32 8 32 16 b 32 24 24 32 16 32 b 8 32 0 24 0 16 b 0 8 8 0 16 0 m 30 28 l 25 32 l 33 40 l 38 36 m 6 16 b 6 22 10 26 16 26 b 22 26 26 22 26 16 b 26 10 22 6 16 6 b 10 6 6 10 6 16")
     end
@@ -599,14 +609,19 @@ local function drawSidebar()
     updateOverlay(ass.text)
 end
 
+local function scaled(size)
+
+    return math.floor(size * fontScale + 0.5)
+end
+
 local function fillData()
 
     data.searchBoxPaddingX              = 20
-    data.searchBoxPaddingY              = 7
-    data.searchBoxHeight                = 30
-    data.searchFontSize                 = 17
-    data.topFontSize                    = 13
-    data.bottomFontSize                 = 17
+    data.searchBoxPaddingY              = scaled(7)
+    data.searchBoxHeight                = scaled(30)
+    data.searchFontSize                 = scaled(17)
+    data.topFontSize                    = scaled(13)
+    data.bottomFontSize                 = scaled(17)
     data.lineMargin                     = 5
     data.borderHeight                   = 1
     data.screenWidth, data.screenHeight = mp.get_osd_size()
@@ -1028,6 +1043,25 @@ local function enter()
     search.resultTimer = mp.add_timeout(3, searchResults)
 end
 
+local function zoomFont(step)
+
+    fontScale = clampScale(math.floor((fontScale + step) * 100 + 0.5) / 100)
+
+    --input.lua caches the text offset per text and cursor, so rebuild it for the new font size
+
+    local searchedText = input.get_text()
+
+    input.reset()
+    input.default(searchedText)
+
+    fillData()
+
+    input.font_size = data.searchFontSize
+    offset          = math.max(1, math.min(offset, data.maxOffset))
+
+    drawSidebar()
+end
+
 local function bindingList(section)
 
     if section == "sidebar" then
@@ -1121,6 +1155,26 @@ local function bindingList(section)
 
                         drawSidebar()
                     end
+                end,
+                opts = nil
+            },
+
+            zoomin = {
+
+                key  = "ctrl+wheel_up",
+                func = function ()
+
+                    if sidebarEnabled and not search.processing and mouseInSidebar() then zoomFont(0.1) end
+                end,
+                opts = nil
+            },
+
+            zoomout = {
+
+                key  = "ctrl+wheel_down",
+                func = function ()
+
+                    if sidebarEnabled and not search.processing and mouseInSidebar() then zoomFont(-0.1) end
                 end,
                 opts = nil
             },
