@@ -3,17 +3,22 @@
 --   timeout 30 mpv --no-config --vo=null --ao=null --idle=yes --script=tests/follow-current-line-test.lua
 -- It prints "ok" and exits 0, or prints the failed check and exits 1.
 
-local mainLua = debug.getinfo(1, "S").source:gsub("^@", ""):gsub("tests/[^/]*$", "sidebarsubtitles/main.lua")
-local tmpDir  = os.tmpname()
-local pointer = {x = 1100, y = 300} --inside the sidebar the whole time, so hover must not block following
-local props   = {path = "video.mkv", sid = 1}
-local keys    = {}
-local observe = {}
-local timers  = {}
-local typed   = "" --the search text
+local mainLua   = debug.getinfo(1, "S").source:gsub("^@", ""):gsub("tests/[^/]*$", "sidebarsubtitles/main.lua")
+local tmpDir    = os.tmpname()
+local pointer   = {x = 1100, y = 300} --inside the sidebar the whole time, so hover must not block following
+local props     = {path = "video.mkv", sid = 1, ["video-margin-ratio-right"] = 0.12}
+local track     = {type = "sub", id = 1, lang = "eng", external = true, ["external-filename"] = tmpDir.."/in.ass", codec = "ass", title = "t"}
+local commands  = {} --subprocess args
+local realUtils = require "mp.utils"
+local keys      = {}
+local observe   = {}
+local timers    = {}
+local typed     = "" --the search text
+local asyncResult
+local osdText
 local hooks
 local overlay
-local ass     = setmetatable({text = ""}, {__index = function(_, name)
+local ass       = setmetatable({text = ""}, {__index = function(_, name)
 
     return name == "append" and function(self, str) self.text = self.text..str end or function() end
 end})
@@ -24,7 +29,7 @@ local function shell(args)
 
     for _, arg in ipairs(args) do table.insert(quoted, "'"..arg.."'") end
 
-    return os.execute(table.concat(quoted, " "))
+    return os.execute(table.concat(quoted, " ").." >/dev/null 2>&1")
 end
 
 local function timer(func)
@@ -71,7 +76,15 @@ local fake = setmetatable({
     get_mouse_pos      = function() return pointer.x, pointer.y end,
     get_property       = function(name) return props[name] end,
     get_property_number = function(name, default) return props[name] or default end,
-    get_property_native = function() return {{type = "sub", id = 1, lang = "eng", external = true, ["external-filename"] = tmpDir.."/in.ass", codec = "ass", title = "t"}} end,
+    get_property_native = function() return {track} end,
+    get_script_directory = function() return (mainLua:gsub("/main.lua$", "")) end,
+    commandv           = function(cmd, name, value) if cmd == "set" then props[name] = value end end,
+    osd_message        = function(text) osdText = text end,
+    command_native_async = function(cmd, callback)
+
+        table.insert(commands, cmd.args)
+        callback(true, asyncResult, nil)
+    end,
     observe_property   = function(name, _, func) observe[name] = func end,
     add_key_binding    = function(_, name, func) keys[name] = func end,
     add_forced_key_binding = function(_, name, func) keys[name] = func end,
@@ -80,7 +93,12 @@ local fake = setmetatable({
     add_timeout        = function(_, func) return timer(func) end,
     command_native     = function(cmd)
 
-        if cmd.name == "subprocess" then return {status = shell(cmd.args) and 0 or 1} end
+        if cmd.name == "subprocess" then
+
+            table.insert(commands, cmd.args)
+
+            return {status = shell(cmd.args) and 0 or 1}
+        end
 
         return cmd[2]
     end,
@@ -88,22 +106,15 @@ local fake = setmetatable({
 
 package.loaded["mp"]         = fake
 package.loaded["mp.options"] = {read_options = function() end}
-package.loaded["mp.utils"]   = {join_path = function(a, b) return a.."/"..b end, format_json = function() return "" end}
+package.loaded["mp.utils"]   = {join_path = function(a, b) return a.."/"..b end, format_json = function() return "" end, parse_json = realUtils.parse_json}
 package.loaded["mp.assdraw"] = {ass_new = function() ass.text = "" return ass end}
-package.loaded["fastutf8"]   = {len = string.len, find = string.find, lower = string.lower, chars = function(s) return s:gmatch(".") end, enable_case_mapping = function() end, set_locale = function() end, reset = function() end,
 
-    gfind = function(text, pattern)
+--the real fastutf8 reads the global mp for its map file directory
 
-        local last = 0
-
-        return function()
-
-            local first, stop = text:find(pattern, last + 1, true)
-
-            if first then last = stop return first, stop end
-        end
-    end
-}
+local realMp = mp
+mp           = fake
+package.loaded["fastutf8"] = dofile((mainLua:gsub("main.lua$", "fastutf8.lua")))
+mp           = realMp
 package.loaded["input"]      = {get_text = function() return typed end, texts = function() return "", "", 0 end, init = function() end, reset = function() typed = "" end, default = function() end, calculate_offset = function() end,
 
     bindings = function(h) hooks = h return {x = {key = "x", func = function() end}} end
@@ -263,6 +274,43 @@ local function run()
     play(120)
     keys.sidebarsubtitles_primary()
     check("reopen after a search", 56, 60)
+
+    --closing gives back the user's video margin
+
+    keys.sidebarsubtitles_primary()
+    assert(props["video-margin-ratio-right"] == 0.12, "video margin not restored")
+
+    --a failed external track is not extracted from the video and is not kept for the next open
+
+    track.codec, track["external-filename"] = "webvtt", tmpDir.."/missing.vtt"
+    asyncResult = {status = 1, stderr = "boom"}
+    keys.sidebarsubtitles_primary()
+    assert(not keys.sidebarsubtitles_sidebarclick and osdText == "Subtitle not found!", "failed track opened")
+
+    for _, args in ipairs(commands) do assert(not table.concat(args, " "):find("0:s:", 1, true), "external track extracted from the video") end
+
+    --an external ASS is read in place, without a copy
+
+    local f = assert(io.open(tmpDir.."/b.ass", "w"))
+
+    f:write("[Events]\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,f(x) a\n")
+    f:close()
+
+    track.codec, track["external-filename"] = "ass", tmpDir.."/b.ass"
+    commands = {}
+    keys.sidebarsubtitles_primary()
+    assert(keys.sidebarsubtitles_sidebarclick, "next track not opened")
+
+    for _, args in ipairs(commands) do assert(not table.concat(args, " "):find("b.ass", 1, true), "external ASS copied") end
+
+    --search text is literal, and one-char and multi-char matches are highlighted
+
+    for search, want in pairs({["("] = "f{\\c&H00FFFF&}({\\c&HFFFFFF&}x) a", x = "f({\\c&H00FFFF&}x{\\c&HFFFFFF&}) a", ["(x"] = "f{\\c&H00FFFF&}(x{\\c&HFFFFFF&}) a"}) do
+
+        typed = search
+        observe["mouse-pos"]()
+        assert(overlay.data:find(want, 1, true), "highlight of "..search)
+    end
 end
 
 local ok, err = xpcall(run, debug.traceback)

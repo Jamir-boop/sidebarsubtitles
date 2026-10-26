@@ -355,7 +355,7 @@ local function highlighter(str, selected)
     local searchedText = utf8.lower(input.get_text())
     local matches      = {}
 
-    for si, li in utf8.gfind(text, searchedText) do
+    for si, li in utf8.gfind(text, (searchedText:gsub("%p", "%%%0"))) do
 
         table.insert(matches, {startIndex = si, lastIndex = li})
     end
@@ -377,7 +377,9 @@ local function highlighter(str, selected)
             preTags = string.format("{\\c&H%s&}", colors.highlight)
 
             if selected then preTags = preTags.."{\\bord1\\3c&H000000&\\blur1}" end
-        elseif matches[m].lastIndex == n then
+        end
+
+        if matches[m].lastIndex == n then
 
             postTags = string.format("{\\c&H%s&}", selected and colors.rowSelectedText or colors.rowText)
 
@@ -391,13 +393,13 @@ local function highlighter(str, selected)
     return content
 end
 
-local function updateOverlay(content, x, y)
+local function updateOverlay(content)
 
     if overlay.data == content and overlay.res_x == data.screenWidth and overlay.res_y == data.screenHeight then return end
 
     overlay.data  = content
-    overlay.res_x = (x and x > 0) and x or data.screenWidth
-    overlay.res_y = (y and y > 0) and x or data.screenHeight
+    overlay.res_x = data.screenWidth
+    overlay.res_y = data.screenHeight
     overlay.z     = 2000
 
     overlay:update()
@@ -699,13 +701,14 @@ end
 local function togglePlayerControls()
 
     if defaultSubMargin == nil then defaultSubMargin = mp.get_property("sub-use-margins") end
+    if defaultVideoMargin == nil then defaultVideoMargin = mp.get_property_number("video-margin-ratio-right", 0) end
     if defaultWindowDragging == nil then defaultWindowDragging = mp.get_property("window-dragging") end
 
     if sidebarEnabled then
 
         setWindowDragging(true)
         mp.set_property("sub-use-margins", defaultSubMargin)
-        mp.commandv("set", "video-margin-ratio-right", 0)
+        mp.commandv("set", "video-margin-ratio-right", defaultVideoMargin)
 
         if customThemes.uosc then
 
@@ -812,7 +815,7 @@ local function initSidebar()
         utf8.reset()
 
         unsetBindings("sidebar")
-        updateOverlay("", 0, 0)
+        updateOverlay("")
         togglePlayerControls()
 
         if config.hide_loaded_subtitle then
@@ -838,8 +841,7 @@ end
 
 local function tryGetSubtitles()
 
-    local isWindows = package.config:sub(1, 1) ~= '/'
-    local merged    = false
+    local merged = false
     local file
 
     if currentSubtitle.title == "merged.ass" then
@@ -852,25 +854,20 @@ local function tryGetSubtitles()
 
         if currentSubtitle.external then
 
-            local sourceFile = currentSubtitle.filename
-            local targetFile = getPath("subtitlefile")
-
             if currentSubtitle.codec == "ass" then
 
-                if isWindows then
+                file = io.open(currentSubtitle.filename, "r")
+            else
 
-                    runCommand({"powershell", "-NoProfile", "-Command", string.format("Copy-Item -LiteralPath \"%s\" -Destination \"%s\" -Force", sourceFile, targetFile)})
-                else
+                local targetFile = getPath("subtitlefile")
+                local result     = runCommand({"ffmpeg", "-y", "-i", currentSubtitle.filename, "-c:s", "ass", targetFile})
 
-                    runCommand({"cp", sourceFile, targetFile})
-                end
-            elseif currentSubtitle.codec == "subrip" then
-
-                runCommand({"ffmpeg", "-i", sourceFile, "-c:s", "ass", targetFile})
+                if result.status == 0 then file = io.open(targetFile, "r") end
             end
-        end
+        else
 
-        file = io.open(getPath("subtitlefile"), "r")
+            file = io.open(getPath("subtitlefile"), "r")
+        end
     end
 
     if not file then
@@ -882,6 +879,8 @@ local function tryGetSubtitles()
 
     local content  = file:read("*all")
     local prevLine = {}
+
+    file:close()
 
     for line in content:gmatch("Dialogue:[^\n]+") do
 
@@ -946,6 +945,13 @@ local function initSidebarWhenSubtitlesLoaded()
 
     if ok then return end
 
+    if currentSubtitle.external then
+
+        currentSubtitle = {}
+
+        return
+    end
+
     mp.osd_message("Getting subtitle lines...", 9999)
 
     local args = {}
@@ -976,6 +982,8 @@ local function initSidebarWhenSubtitlesLoaded()
 
     local onSubtitleFail = function (result)
 
+        currentSubtitle = {}
+
         if string.find(result, "No such file or directory") then
 
             mp.osd_message("No such file or directory.", 3)
@@ -994,7 +1002,7 @@ local function initSidebarWhenSubtitlesLoaded()
 
     runAsync(ffmpegCommand, function()
 
-        tryGetSubtitles()
+        if not tryGetSubtitles() then currentSubtitle = {} end
     end, onSubtitleFail)
 end
 
