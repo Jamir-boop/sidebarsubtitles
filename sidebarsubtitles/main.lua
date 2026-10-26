@@ -747,7 +747,7 @@ local function findIndexByStart(startTime)
 end
 
 --selects the cue that starts at startTime (default: the playing one) and centers it, the caller draws
---a filtered list only gets the selection, its position stays
+--a filtered list or a list the user scrolled only gets the selection, its position stays
 
 local function syncCurrentLine(startTime)
 
@@ -761,10 +761,9 @@ local function syncCurrentLine(startTime)
 
     currentIndex = index
 
-    if #tempSubtitles > 0 then return true end
+    if #tempSubtitles > 0 or browsing then return true end
 
-    offset   = math.max(1, math.min(data.maxOffset, index - math.floor((data.lineCount - 1) / 2)))
-    browsing = false
+    offset = math.max(1, math.min(data.maxOffset, index - math.floor((data.lineCount - 1) / 2)))
 
     return true
 end
@@ -1184,6 +1183,7 @@ local function bindingList(section)
                                 if mouse.y and mouse.y > lineY and mouse.y < lineY + data.lineHeight then
 
                                     currentIndex = i
+                                    browsing     = false
 
                                     mp.commandv("seek", subtitles[i].startTime + 0.01, "absolute+exact")
 
@@ -1325,7 +1325,7 @@ mp.observe_property("secondary-sub-start", "number", function(_, startTime)
     if sidebarEnabled and currentSubtitle.group == "s" and startTime and syncCurrentLine(startTime) then drawSidebar() end
 end)
 
-mp.observe_property("mouse-pos", "native", function()
+mp.observe_property("mouse-pos", "native", function(_, pos)
 
     if not sidebarEnabled then return end
 
@@ -1339,6 +1339,15 @@ mp.observe_property("mouse-pos", "native", function()
     end
 
     local hover = mouseInGrabZone()
+
+    --a scrolled list follows playback again once the pointer leaves the sidebar
+
+    if browsing and not hover and (not mouseInSidebar() or (pos and pos.hover == false)) then
+
+        browsing = false
+
+        if syncCurrentLine() then drawSidebar() end
+    end
 
     setWindowDragging(not hover and not mouseInSidebar())
 

@@ -197,7 +197,7 @@ local function run()
     keys.sidebarsubtitles_sidebarclick({event = "down"})
     check("after a search", 66, 70)
 
-    --manual scroll stays until the next cue, pointer moves do not recenter
+    --manual scroll stays while the pointer is in the sidebar, new cues only move the selection
 
     pointer.y = 300
     keys.sidebarsubtitles_sidebarscrolldown()
@@ -205,7 +205,23 @@ local function run()
     observe["mouse-pos"]()
     check("pointer move", 67, 70)
     play(150)
-    check("next cue after scroll", 71, 75)
+    check("next cue after scroll", 67, 75)
+    keys.sidebarsubtitles_sidebarscrolldown()
+    check("scroll during playback", 68, 75)
+
+    --leaving the sidebar follows playback again
+
+    pointer.x = 300
+    observe["mouse-pos"]()
+    check("pointer left the sidebar", 71, 75)
+
+    --a row click after a scroll seeks there and follows from it
+
+    pointer.x = 1100
+    keys.sidebarsubtitles_sidebarscrolldown()
+    keys.sidebarsubtitles_sidebarclick({event = "down"})
+    play(146)
+    check("follows after a row click", 69, 73)
 
     --zoom changes the row count and the current cue is centered at once
 
